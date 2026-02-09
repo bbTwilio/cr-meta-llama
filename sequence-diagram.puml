@@ -1,0 +1,160 @@
+@startuml "Twilio ConversationRelay + Meta Llama Integration"
+!theme plain
+title Voice AI Assistant - Complete Interaction Flow
+
+participant "Caller\n(Phone)" as Caller
+participant "Twilio\nPlatform" as Twilio
+participant "TwiML\nEndpoint" as TwiML
+participant "WebSocket\nServer" as WS
+participant "Message\nHandler" as Handler
+participant "Session\nManager" as Session
+participant "Llama\nService" as LlamaService
+participant "Meta Llama\nAPI" as LlamaAPI
+
+== Call Initiation ==
+Caller -> Twilio: Initiates phone call
+activate Twilio
+Twilio -> TwiML: POST /api/voice/incoming\n(CallSid, From, To)
+activate TwiML
+
+TwiML -> TwiML: Validate webhook signature
+TwiML -> TwiML: Generate TwiML XML with\nConversationRelay element
+TwiML --> Twilio: <Response>\n  <Connect>\n    <ConversationRelay\n      url="wss://domain/ws"\n      welcomeGreeting="Hello!"/>\n  </Connect>\n</Response>
+deactivate TwiML
+
+Twilio -> Caller: Play welcome greeting\n(Text-to-Speech)
+Twilio -> WS: WebSocket connection\n(wss://domain/ws)
+activate WS
+
+== WebSocket Setup ==
+WS -> Handler: New connection established
+activate Handler
+Twilio -> WS: SETUP message\n{type: 'setup',\n callSid: 'CA...',\n from: '+1234567890',\n to: '+0987654321',\n sessionId: 'uuid'}
+
+WS -> Handler: handleMessage(setup)
+Handler -> Session: createSession(callSid, from, to)
+activate Session
+Session -> Session: Store new session\nin memory
+Session --> Handler: Session created
+deactivate Session
+Handler --> WS: null (no response needed)
+
+== Conversation Loop ==
+group Voice Interaction Loop [Repeats for each user utterance]
+    Caller -> Twilio: Speaks voice input
+    Twilio -> Twilio: Speech-to-Text\ntranscription
+
+    Twilio -> WS: PROMPT message\n{type: 'prompt',\n voicePrompt: 'How can you help?',\n sequenceNumber: 1}
+
+    WS -> Handler: handleMessage(prompt)
+    Handler -> Session: getSession(callSid)
+    activate Session
+    Session --> Handler: Return session with\nconversation history
+    deactivate Session
+
+    Handler -> Session: addMessage('user', voicePrompt)
+    activate Session
+    Session -> Session: Update conversation\nhistory (max 20)
+    deactivate Session
+
+    Handler -> LlamaService: generateResponse(prompt,\nconversationHistory)
+    activate LlamaService
+
+    LlamaService -> LlamaService: buildMessages()\n- System prompt\n- Last 10 messages\n- Current prompt
+
+    LlamaService -> LlamaAPI: POST /v1/chat/completions\n{model: 'Llama-4-Maverick',\n messages: [...],\n max_tokens: 150,\n temperature: 0.7}
+    activate LlamaAPI
+
+    LlamaAPI -> LlamaAPI: Process with\nMeta Llama model
+    LlamaAPI --> LlamaService: AI-generated response\n"I can help you with that..."
+    deactivate LlamaAPI
+
+    LlamaService -> Session: addMessage('assistant',\nresponse)
+    activate Session
+    Session -> Session: Update conversation\nhistory
+    deactivate Session
+
+    LlamaService --> Handler: Return AI response
+    deactivate LlamaService
+
+    Handler -> WS: TEXT message\n{type: 'text',\n token: 'I can help you with that...',\n last: true,\n interruptible: true}
+
+    WS -> Twilio: Send TEXT response
+    Twilio -> Twilio: Text-to-Speech\nconversion
+    Twilio -> Caller: Play AI response audio
+end
+
+== Optional: User Interruption ==
+opt User interrupts while AI is speaking
+    Caller -> Twilio: Starts speaking\n(interrupts TTS)
+    Twilio -> WS: INTERRUPT message\n{type: 'interrupt',\n utteranceUntilInterrupt: 'I can help...',\n durationUntilInterruptMs: 1500}
+
+    WS -> Handler: handleMessage(interrupt)
+    Handler -> Handler: Log interruption\n(optional: adjust context)
+    Handler --> WS: null (no response)
+
+    note right of Twilio: Stops current TTS\nplayback immediately
+
+    Twilio -> Twilio: Transcribe new\nuser input
+    Twilio -> WS: New PROMPT message\nwith interrupted speech
+end
+
+== Optional: DTMF Input ==
+opt User presses phone keypad
+    Caller -> Twilio: Press digit (0-9, *, #)
+    Twilio -> WS: DTMF message\n{type: 'dtmf',\n digit: '1'}
+
+    WS -> Handler: handleMessage(dtmf)
+
+    alt digit == '#'
+        Handler -> WS: END message\n{type: 'end'}
+        WS -> Twilio: Send END response
+        note right of Twilio: Terminate call
+    else other digit
+        Handler -> Handler: Process digit\n(menu navigation, etc.)
+        Handler -> WS: TEXT message with\ndigit acknowledgment
+        WS -> Twilio: Send response
+    end
+end
+
+== Call Termination ==
+alt Caller hangs up
+    Caller -> Twilio: End call
+    Twilio -> WS: Connection close\n(code: 1000)
+else Server initiates end
+    Handler -> WS: END message\n{type: 'end',\n handoffData: {...}}
+    WS -> Twilio: Send END
+    Twilio -> Caller: End call
+else Twilio timeout/error
+    Twilio -> WS: END message\n{type: 'end',\n reason: 'timeout'}
+end
+
+WS -> Handler: handleDisconnection()
+deactivate Handler
+Handler -> Session: endSession(callSid)
+activate Session
+Session -> Session: Clean up session data\nand conversation history
+Session --> Handler: Session ended
+deactivate Session
+
+WS -> WS: Close WebSocket connection
+deactivate WS
+
+Twilio -> TwiML: POST /api/voice/status\n(CallStatus: 'completed',\n CallDuration: 120)
+activate TwiML
+TwiML -> TwiML: Log call metrics
+TwiML --> Twilio: 200 OK
+deactivate TwiML
+
+deactivate Twilio
+
+== Heartbeat (Background Process) ==
+note over Twilio, WS: Periodic heartbeat to maintain connection
+loop Every 30 seconds during active call
+    Twilio -> WS: PING message\n{type: 'ping',\n sequenceNumber: n,\n timestamp: Date.now()}
+    WS -> Handler: handleMessage(ping)
+    Handler -> WS: PONG message\n{type: 'pong',\n sequenceNumber: n,\n timestamp: Date.now()}
+    WS -> Twilio: Send PONG response
+end
+
+@enduml

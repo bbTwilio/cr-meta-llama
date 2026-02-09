@@ -1,0 +1,40 @@
+@startuml "Simplified Voice AI Flow"
+!theme plain
+title Twilio ConversationRelay + Meta Llama - Main Flow
+
+participant "Caller" as C
+participant "Twilio" as T
+participant "Server\n(TwiML)" as S
+participant "WebSocket" as W
+participant "Llama API" as L
+
+== 1. Call Setup ==
+C -> T: Dial phone number
+T -> S: POST /api/voice/incoming
+S --> T: Return TwiML with\n<ConversationRelay url="wss://...">
+T -> C: Play welcome greeting
+T -> W: Open WebSocket connection
+
+== 2. WebSocket Initialization ==
+T -> W: SETUP message\n(callSid, from, to)
+W -> W: Create session
+
+== 3. Conversation Loop ==
+loop Each voice interaction
+    C -> T: Speak
+    T -> T: Speech-to-Text
+    T -> W: PROMPT message\n(transcribed text)
+    W -> L: POST /chat/completions\n(user prompt + history)
+    L --> W: AI response text
+    W -> W: Update conversation history
+    W -> T: TEXT message\n(AI response)
+    T -> T: Text-to-Speech
+    T -> C: Play audio response
+end
+
+== 4. Call End ==
+C -> T: Hang up
+T -> W: Close connection
+W -> W: Clean up session
+
+@enduml
